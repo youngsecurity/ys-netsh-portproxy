@@ -725,12 +725,12 @@ impl PortProxyApp {
                 .inner_margin(egui::Margin::same(12))
                 .show(&mut columns[1], |ui| {
                     ui.strong("Windows Subsystem for Linux");
-                    let status = if self.wsl.available {
-                        "Available"
+                    let (status, color) = if self.wsl.available {
+                        ("Running", Color32::LIGHT_GREEN)
                     } else {
-                        "Not detected"
+                        ("Not detected", Color32::GRAY)
                     };
-                    ui.label(RichText::new(status).strong());
+                    ui.label(RichText::new(status).color(color).strong());
                     ui.label(
                         self.wsl
                             .distribution
