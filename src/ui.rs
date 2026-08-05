@@ -394,7 +394,7 @@ impl PortProxyApp {
                 if ui
                     .add_enabled(
                         selected.is_some() && !self.busy,
-                        egui::Button::new("Enable / disable"),
+                        egui::Button::new("Toggle status"),
                     )
                     .clicked()
                 {
@@ -488,7 +488,7 @@ impl PortProxyApp {
                     if ui
                         .add_enabled(
                             selected.is_some() && !self.busy,
-                            egui::Button::new("Enable / disable"),
+                            egui::Button::new("Toggle status"),
                         )
                         .clicked()
                     {
@@ -592,25 +592,70 @@ impl PortProxyApp {
             );
             return;
         }
+        let mut status_changed = false;
         egui::Grid::new("rules_header")
             .num_columns(8)
             .spacing(egui::vec2(18.0, 8.0))
             .striped(true)
             .show(ui, |ui| {
                 for heading in [
-                    "On", "Type", "Listen", "Connect", "Group", "Comment", "Firewall", "State",
+                    "Selection",
+                    "Status",
+                    "Type",
+                    "Listen",
+                    "Connect",
+                    "Group",
+                    "Comment",
+                    "Firewall",
                 ] {
                     ui.strong(heading);
                 }
                 ui.end_row();
-                for (index, managed) in self.rules.iter().enumerate() {
+                for index in 0..self.rules.len() {
                     let selected = self.selected == Some(index);
+                    let selection_text = if selected { "Selected" } else { "Select" };
+                    let mut selection_button = egui::Button::new(selection_text);
+                    if selected {
+                        selection_button = selection_button.fill(ui.visuals().selection.bg_fill);
+                    }
                     if ui
-                        .selectable_label(selected, if managed.enabled { "✓" } else { "—" })
+                        .add(selection_button)
+                        .on_hover_text("Select this rule for toolbar and Edit menu actions")
                         .clicked()
                     {
                         self.selected = Some(index);
                     }
+
+                    let enabled = self.rules[index].enabled;
+                    let (status_text, status_fill, status_help) = if enabled {
+                        (
+                            RichText::new("● Enabled").color(Color32::WHITE),
+                            Color32::from_rgb(32, 116, 72),
+                            "Enabled: Apply changes will create or keep this Windows port proxy. Click to disable it in the draft.",
+                        )
+                    } else {
+                        (
+                            RichText::new("○ Disabled").color(Color32::WHITE),
+                            Color32::from_rgb(100, 104, 112),
+                            "Disabled: Apply changes will remove this Windows port proxy but retain its saved details. Click to enable it in the draft.",
+                        )
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.busy,
+                            egui::Button::new(status_text)
+                                .fill(status_fill)
+                                .min_size(egui::vec2(92.0, 0.0)),
+                        )
+                        .on_hover_text(status_help)
+                        .clicked()
+                    {
+                        self.rules[index].enabled = !enabled;
+                        self.draft_dirty = true;
+                        status_changed = true;
+                    }
+
+                    let managed = &self.rules[index];
                     ui.label(managed.rule.kind.to_string());
                     ui.label(managed.rule.listen.to_string());
                     ui.label(managed.rule.connect.to_string());
@@ -629,14 +674,12 @@ impl PortProxyApp {
                         FirewallPolicy::DomainAndPrivate => "Private",
                         FirewallPolicy::AllProfiles => "All",
                     });
-                    ui.label(if managed.enabled {
-                        "Desired"
-                    } else {
-                        "Disabled"
-                    });
                     ui.end_row();
                 }
             });
+        if status_changed {
+            self.persist_state();
+        }
     }
 
     #[allow(clippy::too_many_lines)]
