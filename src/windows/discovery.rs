@@ -10,7 +10,7 @@ use crate::{
     app::{AppError, IntegrationProbe, ServiceState},
     integrations::{
         parse_docker_containers, parse_ss_listening_ports, parse_wsl_addresses,
-        parse_wsl_distributions, DockerStatus, WslStatus,
+        parse_wsl_distributions, DockerBackend, DockerStatus, WslStatus,
     },
 };
 
@@ -112,37 +112,91 @@ pub fn discover_wsl() -> WslStatus {
 
 #[must_use]
 pub fn discover_docker() -> DockerStatus {
-    let info = run_text(
-        "docker.exe",
+    discover_docker_with(&run_text)
+}
+
+fn discover_docker_with(run: &impl Fn(&str, &[&str]) -> io::Result<String>) -> DockerStatus {
+    let mut available_fallback = probe_docker_backend(run, DockerBackend::Windows);
+    if available_fallback
+        .as_ref()
+        .is_some_and(|status| status.running)
+    {
+        return available_fallback.expect("running Windows Docker status exists");
+    }
+
+    let distributions = run("wsl.exe", &["--list", "--quiet"])
+        .map(|output| parse_wsl_distributions(&output))
+        .unwrap_or_default();
+    for distribution in distributions {
+        if let Some(status) = probe_docker_backend(
+            run,
+            DockerBackend::Wsl {
+                distribution: distribution.clone(),
+            },
+        ) {
+            if status.running {
+                return status;
+            }
+            available_fallback.get_or_insert(status);
+        }
+    }
+    available_fallback.unwrap_or_default()
+}
+
+fn probe_docker_backend(
+    run: &impl Fn(&str, &[&str]) -> io::Result<String>,
+    backend: DockerBackend,
+) -> Option<DockerStatus> {
+    if docker_command(run, &backend, &["--version"]).is_err() {
+        return None;
+    }
+    if docker_command(
+        run,
+        &backend,
         &["info", "--format", "{{.ServerVersion}}\t{{.Name}}"],
-    );
-    let Ok(_info) = info else {
-        return DockerStatus {
-            available: command_exists("docker.exe"),
+    )
+    .is_err()
+    {
+        return Some(DockerStatus {
+            available: true,
+            backend: Some(backend),
             ..DockerStatus::default()
-        };
-    };
-    let context = run_text("docker.exe", &["context", "show"])
+        });
+    }
+    let context = docker_command(run, &backend, &["context", "show"])
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    let containers = run_text(
-        "docker.exe",
+    let containers = docker_command(
+        run,
+        &backend,
         &["ps", "--format", "{{.ID}}\t{{.Names}}\t{{.Ports}}"],
     )
     .map(|output| parse_docker_containers(&output))
     .unwrap_or_default();
-    DockerStatus {
+    Some(DockerStatus {
         available: true,
         running: true,
+        backend: Some(backend),
         context,
         containers,
-    }
+    })
 }
 
-fn command_exists(executable: &str) -> bool {
-    run_bounded("where.exe", &[executable], Duration::from_secs(2))
-        .is_ok_and(|output| output.status.success())
+fn docker_command(
+    run: &impl Fn(&str, &[&str]) -> io::Result<String>,
+    backend: &DockerBackend,
+    arguments: &[&str],
+) -> io::Result<String> {
+    match backend {
+        DockerBackend::Windows => run("docker.exe", arguments),
+        DockerBackend::Wsl { distribution } => {
+            let mut wsl_arguments =
+                vec!["--distribution", distribution.as_str(), "--exec", "docker"];
+            wsl_arguments.extend_from_slice(arguments);
+            run("wsl.exe", &wsl_arguments)
+        }
+    }
 }
 
 fn run_text(executable: &str, arguments: &[&str]) -> io::Result<String> {
@@ -210,5 +264,51 @@ fn drain_capped(mut reader: impl Read) -> io::Result<Vec<u8>> {
         }
         let remaining = MAX_OUTPUT_BYTES.saturating_sub(output.len());
         output.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_running_docker_inside_wsl_when_windows_cli_is_missing() {
+        let run = |executable: &str, arguments: &[&str]| -> io::Result<String> {
+            let command = format!("{executable} {}", arguments.join(" "));
+            match command.as_str() {
+                "docker.exe --version" => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "docker.exe is not installed",
+                )),
+                "wsl.exe --list --quiet" => Ok("Ubuntu\n".to_owned()),
+                "wsl.exe --distribution Ubuntu --exec docker --version" => {
+                    Ok("Docker version 29.6.1\n".to_owned())
+                }
+                "wsl.exe --distribution Ubuntu --exec docker info --format {{.ServerVersion}}\t{{.Name}}" => {
+                    Ok("29.6.1\tubuntu-docker\n".to_owned())
+                }
+                "wsl.exe --distribution Ubuntu --exec docker context show" => {
+                    Ok("default\n".to_owned())
+                }
+                "wsl.exe --distribution Ubuntu --exec docker ps --format {{.ID}}\t{{.Names}}\t{{.Ports}}" => {
+                    Ok("abc123\tportainer_agent\t9001/tcp\n".to_owned())
+                }
+                _ => Err(io::Error::other(format!("unexpected command: {command}"))),
+            }
+        };
+
+        let status = discover_docker_with(&run);
+
+        assert!(status.available);
+        assert!(status.running);
+        assert_eq!(
+            status.backend,
+            Some(DockerBackend::Wsl {
+                distribution: "Ubuntu".to_owned(),
+            })
+        );
+        assert_eq!(status.context.as_deref(), Some("default"));
+        assert_eq!(status.containers.len(), 1);
+        assert_eq!(status.containers[0].name, "portainer_agent");
     }
 }

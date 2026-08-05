@@ -10,7 +10,7 @@ The implementation under `src/` uses Rust, eframe/egui, and windows-rs. It provi
 - list, add, edit, clone, enable/disable, range expansion, and delete workflows;
 - comments, groups, application-owned firewall policies, and versioned import/export;
 - IP Helper status/start/reload controls;
-- WSL address/listener and Docker status discovery;
+- WSL address/listener discovery plus Docker detection on Windows or inside WSL distributions;
 - registry backups, transactional mutation, state re-read, and verification;
 - an unelevated GUI plus a one-request, typed elevated helper over bounded named-pipe IPC.
 

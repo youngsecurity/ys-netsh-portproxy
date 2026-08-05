@@ -16,7 +16,7 @@ use ys_netsh_portproxy::{
         expand_listen_port_range, Endpoint, FirewallPolicy, ManagedRule, Port, ProxyKind,
         ProxyRule, ReconcileMode,
     },
-    integrations::{DockerStatus, WslStatus},
+    integrations::{DockerBackend, DockerStatus, WslStatus},
     protocol::{CommandResult, PrivilegedCommand},
     state::UserState,
     windows::{
@@ -24,6 +24,12 @@ use ys_netsh_portproxy::{
         RegistryReadReport, WindowsProbes, WslAction,
     },
 };
+
+struct ViewOptions {
+    integrations: bool,
+    transfer: bool,
+    about: bool,
+}
 
 pub struct PortProxyApp {
     rules: Vec<ManagedRule>,
@@ -43,6 +49,7 @@ pub struct PortProxyApp {
     draft_dirty: bool,
     backup_id: String,
     baseline_rules: Vec<ProxyRule>,
+    views: ViewOptions,
     state_path: PathBuf,
     sender: Sender<WorkerResult>,
     receiver: Receiver<WorkerResult>,
@@ -52,6 +59,7 @@ impl PortProxyApp {
     #[must_use]
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         let (sender, receiver) = mpsc::channel();
+        configure_style(&context.egui_ctx);
         let state_path = state_path();
         let state = UserState::load(&state_path).unwrap_or_default();
         let mut app = Self {
@@ -72,6 +80,11 @@ impl PortProxyApp {
             draft_dirty: state.draft_dirty,
             backup_id: state.last_backup_id,
             baseline_rules: state.baseline_rules,
+            views: ViewOptions {
+                integrations: true,
+                transfer: false,
+                about: false,
+            },
             state_path,
             sender,
             receiver,
@@ -319,104 +332,234 @@ impl PortProxyApp {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Refresh"))
-                .clicked()
-            {
-                self.spawn_refresh(context.clone());
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("New"))
-                .clicked()
-            {
-                self.editor = Some(RuleEditor::new());
-            }
-            let selected = self.selected.filter(|index| *index < self.rules.len());
-            if ui
-                .add_enabled(selected.is_some() && !self.busy, egui::Button::new("Edit"))
-                .clicked()
-            {
-                let index = selected.unwrap();
-                self.editor = Some(RuleEditor::from_rule(index, &self.rules[index]));
-            }
-            if ui
-                .add_enabled(selected.is_some() && !self.busy, egui::Button::new("Clone"))
-                .clicked()
-            {
-                let index = selected.unwrap();
-                self.editor = Some(RuleEditor::clone_rule(&self.rules[index]));
-            }
-            if ui
-                .add_enabled(
-                    selected.is_some() && !self.busy,
-                    egui::Button::new("Toggle"),
-                )
-                .clicked()
-            {
-                let item = &mut self.rules[selected.unwrap()];
-                item.enabled = !item.enabled;
-                self.draft_dirty = true;
-                self.persist_state();
-            }
-            if ui
-                .add_enabled(
-                    selected.is_some() && !self.busy,
-                    egui::Button::new("Delete"),
-                )
-                .clicked()
-            {
-                self.rules.remove(selected.unwrap());
-                self.selected = None;
-                self.draft_dirty = true;
-                self.persist_state();
-            }
-            if ui
-                .add_enabled(
-                    selected.is_some() && !self.busy,
-                    egui::Button::new("Remove firewall"),
-                )
-                .clicked()
-            {
-                let rule_id = firewall_rule_id(self.rules[selected.unwrap()].rule.key());
-                self.spawn_command(
-                    PrivilegedCommand::RemoveFirewallRule { rule_id },
-                    context.clone(),
-                );
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Apply all"))
-                .clicked()
-            {
-                self.spawn_apply(context.clone());
-            }
+    #[allow(clippy::too_many_lines)]
+    fn menu_bar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let selected = self.selected.filter(|index| *index < self.rules.len());
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("New rule"))
+                    .clicked()
+                {
+                    self.editor = Some(RuleEditor::new());
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Refresh from Windows"))
+                    .clicked()
+                {
+                    self.spawn_refresh(context.clone());
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Apply pending changes"))
+                    .clicked()
+                {
+                    self.spawn_apply(context.clone());
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Import / export…").clicked() {
+                    self.views.transfer = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Exit").clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                if ui
+                    .add_enabled(
+                        selected.is_some() && !self.busy,
+                        egui::Button::new("Edit rule"),
+                    )
+                    .clicked()
+                {
+                    let index = selected.expect("enabled only with a selected rule");
+                    self.editor = Some(RuleEditor::from_rule(index, &self.rules[index]));
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        selected.is_some() && !self.busy,
+                        egui::Button::new("Clone rule"),
+                    )
+                    .clicked()
+                {
+                    let index = selected.expect("enabled only with a selected rule");
+                    self.editor = Some(RuleEditor::clone_rule(&self.rules[index]));
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        selected.is_some() && !self.busy,
+                        egui::Button::new("Enable / disable"),
+                    )
+                    .clicked()
+                {
+                    let item = &mut self.rules[selected.expect("enabled only with a selection")];
+                    item.enabled = !item.enabled;
+                    self.draft_dirty = true;
+                    self.persist_state();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        selected.is_some() && !self.busy,
+                        egui::Button::new("Remove managed firewall rule"),
+                    )
+                    .clicked()
+                {
+                    let index = selected.expect("enabled only with a selected rule");
+                    let rule_id = firewall_rule_id(self.rules[index].rule.key());
+                    self.spawn_command(
+                        PrivilegedCommand::RemoveFirewallRule { rule_id },
+                        context.clone(),
+                    );
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        selected.is_some() && !self.busy,
+                        egui::Button::new("Delete rule"),
+                    )
+                    .clicked()
+                {
+                    self.rules
+                        .remove(selected.expect("enabled only with a selected rule"));
+                    self.selected = None;
+                    self.draft_dirty = true;
+                    self.persist_state();
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut self.views.integrations, "Integration status");
+                ui.checkbox(&mut self.views.transfer, "Import / export");
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("About").clicked() {
+                    self.views.about = true;
+                    ui.close_menu();
+                }
+            });
         });
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Sort by");
-            egui::ComboBox::from_id_salt("sort_column")
-                .selected_text(&self.sort_column)
-                .show_ui(ui, |ui| {
-                    for column in ["Type", "Listen", "Connect", "Group", "Comment", "Enabled"] {
-                        changed |= ui
-                            .selectable_value(&mut self.sort_column, column.to_owned(), column)
-                            .changed();
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn toolbar(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        let fill = ui.visuals().faint_bg_color;
+        let mut sort_changed = false;
+        egui::Frame::new()
+            .fill(fill)
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .corner_radius(6)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("New rule"))
+                        .clicked()
+                    {
+                        self.editor = Some(RuleEditor::new());
+                    }
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("Refresh"))
+                        .clicked()
+                    {
+                        self.spawn_refresh(context.clone());
+                    }
+                    let selected = self.selected.filter(|index| *index < self.rules.len());
+                    if ui
+                        .add_enabled(selected.is_some() && !self.busy, egui::Button::new("Edit"))
+                        .clicked()
+                    {
+                        let index = selected.expect("enabled only with a selected rule");
+                        self.editor = Some(RuleEditor::from_rule(index, &self.rules[index]));
+                    }
+                    if ui
+                        .add_enabled(selected.is_some() && !self.busy, egui::Button::new("Clone"))
+                        .clicked()
+                    {
+                        let index = selected.expect("enabled only with a selected rule");
+                        self.editor = Some(RuleEditor::clone_rule(&self.rules[index]));
+                    }
+                    if ui
+                        .add_enabled(
+                            selected.is_some() && !self.busy,
+                            egui::Button::new("Enable / disable"),
+                        )
+                        .clicked()
+                    {
+                        let item =
+                            &mut self.rules[selected.expect("enabled only with a selection")];
+                        item.enabled = !item.enabled;
+                        self.draft_dirty = true;
+                        self.persist_state();
+                    }
+                    if ui
+                        .add_enabled(
+                            selected.is_some() && !self.busy,
+                            egui::Button::new("Delete"),
+                        )
+                        .clicked()
+                    {
+                        self.rules
+                            .remove(selected.expect("enabled only with a selected rule"));
+                        self.selected = None;
+                        self.draft_dirty = true;
+                        self.persist_state();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("Apply changes"))
+                        .clicked()
+                    {
+                        self.spawn_apply(context.clone());
                     }
                 });
-            if ui
-                .button(if self.sort_ascending {
-                    "Ascending"
-                } else {
-                    "Descending"
-                })
-                .clicked()
-            {
-                self.sort_ascending = !self.sort_ascending;
-                changed = true;
-            }
-        });
-        if changed {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Sort");
+                    egui::ComboBox::from_id_salt("sort_column")
+                        .selected_text(&self.sort_column)
+                        .show_ui(ui, |ui| {
+                            for column in
+                                ["Type", "Listen", "Connect", "Group", "Comment", "Enabled"]
+                            {
+                                sort_changed |= ui
+                                    .selectable_value(
+                                        &mut self.sort_column,
+                                        column.to_owned(),
+                                        column,
+                                    )
+                                    .changed();
+                            }
+                        });
+                    if ui
+                        .button(if self.sort_ascending {
+                            "Ascending"
+                        } else {
+                            "Descending"
+                        })
+                        .clicked()
+                    {
+                        self.sort_ascending = !self.sort_ascending;
+                        sort_changed = true;
+                    }
+                    ui.separator();
+                    ui.label(format!("{} rules", self.rules.len()));
+                    if self.draft_dirty {
+                        ui.label(
+                            RichText::new("Pending changes")
+                                .color(Color32::YELLOW)
+                                .strong(),
+                        );
+                    }
+                });
+            });
+        if sort_changed {
             self.sort_rules();
             self.persist_state();
         }
@@ -440,8 +583,18 @@ impl PortProxyApp {
     }
 
     fn rules_table(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Port proxy rules");
+        ui.add_space(6.0);
+        if self.rules.is_empty() {
+            ui.label(
+                RichText::new("No rules yet. Choose New rule to create your first port proxy.")
+                    .color(ui.visuals().weak_text_color()),
+            );
+            return;
+        }
         egui::Grid::new("rules_header")
             .num_columns(8)
+            .spacing(egui::vec2(18.0, 8.0))
             .striped(true)
             .show(ui, |ui| {
                 for heading in [
@@ -486,93 +639,141 @@ impl PortProxyApp {
             });
     }
 
+    #[allow(clippy::too_many_lines)]
     fn status_panel(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.label("IP Helper:");
-            let (label, color) = match self.ip_helper {
-                ServiceState::Running => ("Running", Color32::LIGHT_GREEN),
-                ServiceState::Stopped => ("Stopped", Color32::LIGHT_RED),
-                ServiceState::StartPending => ("Starting", Color32::YELLOW),
-                ServiceState::StopPending => ("Stopping", Color32::YELLOW),
-                ServiceState::Unknown => ("Unknown", Color32::GRAY),
-            };
-            ui.label(RichText::new(label).color(color));
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Start"))
-                .clicked()
-            {
-                self.spawn_command(PrivilegedCommand::StartIpHelper, context.clone());
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Reload"))
-                .clicked()
-            {
-                self.spawn_command(PrivilegedCommand::ReloadIpHelper, context.clone());
-            }
-            ui.separator();
-            ui.label(format!(
-                "WSL: {}{}",
-                if self.wsl.available {
-                    "available"
-                } else {
-                    "unavailable"
-                },
-                self.wsl
-                    .distribution
-                    .as_ref()
-                    .map_or_else(String::new, |name| format!(" ({name})"))
-            ));
-            ui.label(format!("ports {:?}", self.wsl.listening_ports));
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("WSL start"))
-                .clicked()
-            {
-                self.spawn_local_action(LocalAction::Wsl(WslAction::Start), context.clone());
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("WSL restart"))
-                .clicked()
-            {
-                self.spawn_local_action(LocalAction::Wsl(WslAction::Restart), context.clone());
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("WSL shutdown"))
-                .clicked()
-            {
-                self.spawn_local_action(LocalAction::Wsl(WslAction::Shutdown), context.clone());
-            }
-            ui.separator();
-            ui.label(format!(
-                "Docker: {} ({} container(s))",
-                if self.docker.running {
-                    "running"
-                } else {
-                    "stopped"
-                },
-                self.docker.containers.len()
-            ));
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Docker start"))
-                .clicked()
-            {
-                self.spawn_local_action(LocalAction::Docker(DockerAction::Start), context.clone());
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Docker restart"))
-                .clicked()
-            {
-                self.spawn_local_action(
-                    LocalAction::Docker(DockerAction::Restart),
-                    context.clone(),
-                );
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Docker stop"))
-                .clicked()
-            {
-                self.spawn_local_action(LocalAction::Docker(DockerAction::Stop), context.clone());
-            }
+        ui.heading("System status");
+        ui.add_space(6.0);
+        let docker_is_windows = matches!(self.docker.backend, Some(DockerBackend::Windows));
+        let docker_backend = match &self.docker.backend {
+            Some(DockerBackend::Windows) => "Windows / Docker Desktop".to_owned(),
+            Some(DockerBackend::Wsl { distribution }) => format!("WSL / {distribution}"),
+            None => "No Docker CLI detected".to_owned(),
+        };
+        ui.columns(3, |columns| {
+            egui::Frame::group(columns[0].style())
+                .inner_margin(egui::Margin::same(12))
+                .show(&mut columns[0], |ui| {
+                    ui.strong("IP Helper");
+                    let (label, color) = match self.ip_helper {
+                        ServiceState::Running => ("Running", Color32::LIGHT_GREEN),
+                        ServiceState::Stopped => ("Stopped", Color32::LIGHT_RED),
+                        ServiceState::StartPending => ("Starting", Color32::YELLOW),
+                        ServiceState::StopPending => ("Stopping", Color32::YELLOW),
+                        ServiceState::Unknown => ("Unknown", Color32::GRAY),
+                    };
+                    ui.label(RichText::new(label).color(color).strong());
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("Start"))
+                            .clicked()
+                        {
+                            self.spawn_command(PrivilegedCommand::StartIpHelper, context.clone());
+                        }
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("Reload"))
+                            .clicked()
+                        {
+                            self.spawn_command(PrivilegedCommand::ReloadIpHelper, context.clone());
+                        }
+                    });
+                });
+            egui::Frame::group(columns[1].style())
+                .inner_margin(egui::Margin::same(12))
+                .show(&mut columns[1], |ui| {
+                    ui.strong("Windows Subsystem for Linux");
+                    let status = if self.wsl.available {
+                        "Available"
+                    } else {
+                        "Not detected"
+                    };
+                    ui.label(RichText::new(status).strong());
+                    ui.label(
+                        self.wsl
+                            .distribution
+                            .as_deref()
+                            .unwrap_or("No distribution"),
+                    );
+                    ui.label(format!(
+                        "{} listening ports",
+                        self.wsl.listening_ports.len()
+                    ));
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("Start"))
+                            .clicked()
+                        {
+                            self.spawn_local_action(
+                                LocalAction::Wsl(WslAction::Start),
+                                context.clone(),
+                            );
+                        }
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("Restart"))
+                            .clicked()
+                        {
+                            self.spawn_local_action(
+                                LocalAction::Wsl(WslAction::Restart),
+                                context.clone(),
+                            );
+                        }
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new("Shutdown"))
+                            .clicked()
+                        {
+                            self.spawn_local_action(
+                                LocalAction::Wsl(WslAction::Shutdown),
+                                context.clone(),
+                            );
+                        }
+                    });
+                });
+            egui::Frame::group(columns[2].style())
+                .inner_margin(egui::Margin::same(12))
+                .show(&mut columns[2], |ui| {
+                    ui.strong("Docker");
+                    let (status, color) = if self.docker.running {
+                        ("Running", Color32::LIGHT_GREEN)
+                    } else if self.docker.available {
+                        ("Stopped", Color32::LIGHT_RED)
+                    } else {
+                        ("Not detected", Color32::GRAY)
+                    };
+                    ui.label(RichText::new(status).color(color).strong());
+                    ui.label(docker_backend);
+                    let count = self.docker.containers.len();
+                    ui.label(format!(
+                        "{count} {}",
+                        if count == 1 {
+                            "container"
+                        } else {
+                            "containers"
+                        }
+                    ));
+                    ui.add_space(4.0);
+                    if docker_is_windows {
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, action) in [
+                                ("Start", DockerAction::Start),
+                                ("Restart", DockerAction::Restart),
+                                ("Stop", DockerAction::Stop),
+                            ] {
+                                if ui
+                                    .add_enabled(!self.busy, egui::Button::new(label))
+                                    .clicked()
+                                {
+                                    self.spawn_local_action(
+                                        LocalAction::Docker(action),
+                                        context.clone(),
+                                    );
+                                }
+                            }
+                        });
+                    } else if matches!(self.docker.backend, Some(DockerBackend::Wsl { .. })) {
+                        ui.small("Docker lifecycle is managed inside WSL.");
+                    }
+                });
         });
     }
 
@@ -638,6 +839,26 @@ impl PortProxyApp {
         }
     }
 
+    fn about_window(&mut self, context: &egui::Context) {
+        if !self.views.about {
+            return;
+        }
+        egui::Window::new("About Young Security Port Proxy")
+            .open(&mut self.views.about)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.heading("Young Security Port Proxy");
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(8.0);
+                ui.label("A native Windows manager for netsh interface portproxy.");
+                ui.hyperlink_to(
+                    "Project on GitHub",
+                    "https://github.com/youngsecurity/ys-netsh-portproxy",
+                );
+            });
+    }
+
     fn editor_window(&mut self, context: &egui::Context) {
         let Some(mut editor) = self.editor.take() else {
             return;
@@ -673,7 +894,7 @@ impl PortProxyApp {
                     self.selected = None;
                     self.draft_dirty = true;
                     self.persist_state();
-                    "Draft updated; choose Apply all to change Windows"
+                    "Draft updated; choose Apply changes to update Windows"
                         .clone_into(&mut self.message);
                     return;
                 }
@@ -690,25 +911,50 @@ impl eframe::App for PortProxyApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_worker_results(context);
         egui::TopBottomPanel::top("top").show(context, |ui| {
+            self.menu_bar(ui, context);
+            ui.separator();
             ui.horizontal(|ui| {
                 ui.heading("Young Security Port Proxy");
-                ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).weak());
                 if self.busy {
                     ui.spinner();
                 }
             });
+            ui.add_space(6.0);
             self.toolbar(ui, context);
+            ui.add_space(4.0);
         });
         egui::CentralPanel::default().show(context, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| self.rules_table(ui));
-            self.status_panel(ui, context);
-            self.import_export_panel(ui, context);
-            self.diagnostics_panel(ui);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(4.0);
+                egui::Frame::group(ui.style())
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::horizontal().show(ui, |ui| self.rules_table(ui));
+                    });
+                if self.views.integrations {
+                    ui.add_space(14.0);
+                    self.status_panel(ui, context);
+                }
+                if self.views.transfer {
+                    ui.add_space(14.0);
+                    self.import_export_panel(ui, context);
+                }
+                self.diagnostics_panel(ui);
+            });
         });
         egui::TopBottomPanel::bottom("bottom").show(context, |ui| {
-            ui.label(&self.message);
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                if self.busy {
+                    ui.spinner();
+                }
+                ui.label(&self.message);
+            });
+            ui.add_space(3.0);
         });
         self.editor_window(context);
+        self.about_window(context);
     }
 }
 
@@ -922,6 +1168,16 @@ fn command_result_message(result: CommandResult) -> String {
             format!("Registry backup restored; undo backup {backup_id}")
         }
     }
+}
+
+fn configure_style(context: &egui::Context) {
+    context.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.interact_size.y = 30.0;
+        style.spacing.window_margin = egui::Margin::same(12);
+        style.spacing.indent = 20.0;
+    });
 }
 
 fn state_path() -> PathBuf {

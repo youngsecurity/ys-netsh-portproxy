@@ -10,10 +10,17 @@ pub struct WslStatus {
     pub listening_ports: Vec<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockerBackend {
+    Windows,
+    Wsl { distribution: String },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DockerStatus {
     pub available: bool,
     pub running: bool,
+    pub backend: Option<DockerBackend>,
     pub context: Option<String>,
     pub containers: Vec<DockerContainer>,
 }
