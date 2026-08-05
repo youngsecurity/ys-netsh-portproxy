@@ -30,6 +30,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo build --release --bins
+      - name: Verify GUI uses the Windows subsystem
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes("target/release/ys-netsh-portproxy.exe")
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          if ($subsystem -ne 2) {
+            throw "Expected IMAGE_SUBSYSTEM_WINDOWS_GUI (2), found $subsystem"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ys-netsh-portproxy-windows

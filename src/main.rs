@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("ys-netsh-portproxy is a Windows desktop application");
@@ -8,18 +10,34 @@ fn main() {
 mod ui;
 
 #[cfg(windows)]
-fn main() -> eframe::Result<()> {
+#[allow(unsafe_code)]
+fn show_startup_error(message: &str) {
+    use windows::{
+        core::HSTRING,
+        Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK},
+    };
+
+    let message = HSTRING::from(message);
+    let title = HSTRING::from("Young Security Port Proxy");
+    // SAFETY: Both strings remain alive and valid for the duration of the modal call.
+    unsafe {
+        MessageBoxW(None, &message, &title, MB_OK | MB_ICONERROR);
+    }
+}
+
+#[cfg(windows)]
+fn main() {
     match ys_netsh_portproxy::windows::is_elevated() {
         Ok(false) => {}
         Ok(true) => {
-            eprintln!(
-                "ys-netsh-portproxy must run unelevated; launch it from a standard user session"
+            show_startup_error(
+                "Young Security Port Proxy must run unelevated. Launch it from a standard user session.",
             );
-            return Ok(());
+            return;
         }
         Err(error) => {
-            eprintln!("could not verify the GUI process token: {error}");
-            return Ok(());
+            show_startup_error(&format!("Could not verify the GUI process token: {error}"));
+            return;
         }
     }
     let options = eframe::NativeOptions {
@@ -28,9 +46,11 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([840.0, 520.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    if let Err(error) = eframe::run_native(
         "Young Security Port Proxy",
         options,
         Box::new(|context| Ok(Box::new(ui::PortProxyApp::new(context)))),
-    )
+    ) {
+        show_startup_error(&format!("The application could not start: {error}"));
+    }
 }
