@@ -1,0 +1,62 @@
+[package]
+name = "ys-netsh-portproxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "A native Windows manager for netsh interface portproxy"
+license = "MIT"
+repository = "https://github.com/youngsecurity/ys-netsh-portproxy"
+
+[lib]
+name = "ys_netsh_portproxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ys-netsh-portproxy"
+path = "src/main.rs"
+
+[[bin]]
+name = "ys-netsh-portproxy-helper"
+path = "src/bin/helper.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.19"
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow"] }
+egui_extras = { version = "0.31.1", default-features = false }
+image = { version = "=0.25.5", default-features = false, features = ["ico", "png"] }
+getrandom = "0.3.4"
+interprocess = "2.4.3"
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_WindowsFirewall",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Services",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+windows-registry = "0.6.1"
+
+[dev-dependencies]
+proptest = "1.7.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

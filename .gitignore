@@ -1,0 +1,11 @@
+# Rust
+/target/
+
+# Editors and local tooling
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local application state
+*.local.json
