@@ -31,7 +31,7 @@ pub use discovery::{
     discover_docker, discover_wsl, run_docker_action, run_wsl_action, DockerAction, WindowsProbes,
     WslAction,
 };
-pub use ipc::{serve_helper, ElevatedHelperClient};
+pub use ipc::{helper_path, serve_helper, ElevatedHelperClient};
 pub use registry::{RegistryAdapter, RegistryReadReport};
 pub use services::IpHelperService;
 
@@ -337,7 +337,7 @@ fn backup_path(backup_id: &str) -> PathBuf {
 
 pub fn is_elevated() -> Result<bool, AppError> {
     let mut token = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) }
         .map_err(|error| AppError::Adapter(error.to_string()))?;
     let token = OwnedHandle(token);
     let mut elevation = TOKEN_ELEVATION::default();
@@ -349,7 +349,7 @@ pub fn is_elevated() -> Result<bool, AppError> {
             Some(std::ptr::from_mut(&mut elevation).cast()),
             u32::try_from(std::mem::size_of::<TOKEN_ELEVATION>())
                 .expect("TOKEN_ELEVATION size fits u32"),
-            &mut returned,
+            &raw mut returned,
         )
     }
     .map_err(|error| AppError::Adapter(error.to_string()))?;

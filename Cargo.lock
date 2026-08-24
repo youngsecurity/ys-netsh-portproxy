@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "ys-netsh-portproxy"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -2916,6 +2916,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "widestring",
  "windows",
  "windows-registry",
 ]

@@ -29,7 +29,7 @@ impl IpHelperService {
     pub fn state(&self) -> Result<ServiceState, AppError> {
         let service = open_service(SERVICE_QUERY_STATUS)?;
         let mut status = SERVICE_STATUS::default();
-        unsafe { QueryServiceStatus(service.0, &mut status) }.map_err(adapter_error)?;
+        unsafe { QueryServiceStatus(service.0, &raw mut status) }.map_err(adapter_error)?;
         Ok(match status.dwCurrentState {
             SERVICE_RUNNING => ServiceState::Running,
             SERVICE_STOPPED => ServiceState::Stopped,
@@ -63,7 +63,7 @@ impl IpHelperService {
         }
         let service = open_service(SERVICE_PAUSE_CONTINUE | SERVICE_QUERY_STATUS)?;
         let mut status = SERVICE_STATUS::default();
-        unsafe { ControlService(service.0, SERVICE_CONTROL_PARAMCHANGE, &mut status) }
+        unsafe { ControlService(service.0, SERVICE_CONTROL_PARAMCHANGE, &raw mut status) }
             .map_err(adapter_error)
     }
 }

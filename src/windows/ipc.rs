@@ -12,17 +12,27 @@ use std::{
 };
 
 use interprocess::{
-    os::windows::named_pipe::{pipe_mode, DuplexPipeStream, PipeListenerOptions},
+    os::windows::{
+        named_pipe::{pipe_mode, DuplexPipeStream, PipeListenerOptions},
+        security_descriptor::SecurityDescriptor,
+    },
     ConnectWaitMode,
 };
+use widestring::U16CString;
 use windows::{
-    core::{w, PCWSTR},
+    core::{w, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
+            TOKEN_USER,
+        },
         System::{
             Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
             Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
-            Threading::GetProcessId,
+            Threading::{
+                GetProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
         UI::{
             Shell::{
@@ -78,6 +88,12 @@ impl PrivilegedExecutor for ElevatedHelperClient {
                 ConnectWaitMode::Timeout(Duration::from_millis(250)),
             ) {
                 Ok(stream) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    return Err(AppError::Adapter(format!(
+                        "access denied connecting to the elevated helper's named pipe; \
+                         the pipe security descriptor does not admit this process token: {error}"
+                    )));
+                }
                 Err(error) if Instant::now() < deadline => {
                     if !matches!(
                         error.kind(),
@@ -98,7 +114,7 @@ impl PrivilegedExecutor for ElevatedHelperClient {
         };
 
         let mut server_pid = 0_u32;
-        unsafe { GetNamedPipeServerProcessId(HANDLE(stream.as_raw_handle()), &mut server_pid) }
+        unsafe { GetNamedPipeServerProcessId(HANDLE(stream.as_raw_handle()), &raw mut server_pid) }
             .map_err(adapter_error)?;
         if server_pid != helper_pid {
             return Err(AppError::Adapter(
@@ -136,8 +152,10 @@ pub fn serve_helper(
         ));
     }
 
+    let security_descriptor = pipe_security_descriptor(parent_pid)?;
     let listener = PipeListenerOptions::new()
         .path(pipe_path)
+        .security_descriptor(Some(security_descriptor))
         .nonblocking(true)
         .instance_limit(NonZeroU8::new(2))
         .accept_remote(false)
@@ -163,7 +181,7 @@ pub fn serve_helper(
     stream.set_nonblocking(true).map_err(adapter_error)?;
 
     let mut client_pid = 0_u32;
-    unsafe { GetNamedPipeClientProcessId(HANDLE(stream.as_raw_handle()), &mut client_pid) }
+    unsafe { GetNamedPipeClientProcessId(HANDLE(stream.as_raw_handle()), &raw mut client_pid) }
         .map_err(adapter_error)?;
     if client_pid != parent_pid {
         return Err(AppError::Adapter(
@@ -288,13 +306,62 @@ fn launch_elevated(
         nShow: SW_HIDE.0,
         ..Default::default()
     };
-    unsafe { ShellExecuteExW(&mut info) }.map_err(adapter_error)?;
+    unsafe { ShellExecuteExW(&raw mut info) }.map_err(adapter_error)?;
     if info.hProcess.is_invalid() {
         return Err(AppError::Adapter(
             "elevated helper did not return a process handle".to_owned(),
         ));
     }
     Ok(OwnedProcess(info.hProcess))
+}
+
+/// Builds an explicit security descriptor for the helper's named pipe.
+///
+/// The helper runs elevated, so a default-DACL pipe would only admit `SYSTEM` and
+/// `Administrators` — the launching GUI holds the limited (filtered) token, in which the
+/// Administrators group is deny-only, and would be rejected with `ACCESS_DENIED`. Grant the
+/// launching process's exact user SID instead; request authenticity is still enforced by the
+/// client-PID and session-nonce checks in `serve_helper`.
+fn pipe_security_descriptor(parent_pid: u32) -> Result<SecurityDescriptor, AppError> {
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, parent_pid) }
+        .map_err(adapter_error)?;
+    let process = OwnedProcess(process);
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &raw mut token) }.map_err(adapter_error)?;
+    let token = OwnedProcess(token);
+    let mut needed = 0_u32;
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &raw mut needed) };
+    if needed == 0 {
+        return Err(AppError::Adapter(
+            "could not size the launching process's token user information".to_owned(),
+        ));
+    }
+    let words = usize::try_from(needed.div_ceil(8)).map_err(adapter_error)?;
+    let mut buffer = vec![0_u64; words];
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            needed,
+            &raw mut needed,
+        )
+    }
+    .map_err(adapter_error)?;
+    // SAFETY: GetTokenInformation(TokenUser) filled the 8-byte-aligned buffer with a
+    // TOKEN_USER structure followed by the SID it points into.
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let mut sid_text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(token_user.User.Sid, &raw mut sid_text) }
+        .map_err(adapter_error)?;
+    // SAFETY: ConvertSidToStringSidW returned a valid NUL-terminated wide string.
+    let sid = unsafe { sid_text.to_string() }.map_err(adapter_error);
+    unsafe { LocalFree(Some(HLOCAL(sid_text.as_ptr().cast()))) };
+    let sid = sid?;
+    let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})");
+    let sddl = U16CString::from_str(&sddl)
+        .map_err(|error| AppError::Adapter(format!("invalid SDDL string: {error}")))?;
+    SecurityDescriptor::deserialize(&sddl).map_err(adapter_error)
 }
 
 struct ComApartment;
@@ -314,7 +381,7 @@ impl Drop for ComApartment {
     }
 }
 
-fn helper_path() -> Result<std::path::PathBuf, AppError> {
+pub fn helper_path() -> Result<std::path::PathBuf, AppError> {
     let executable = std::env::current_exe().map_err(adapter_error)?;
     let directory = executable
         .parent()
@@ -350,6 +417,16 @@ fn adapter_error(error: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipe_security_descriptor_grants_the_launching_user() {
+        pipe_security_descriptor(std::process::id()).unwrap();
+    }
+
+    #[test]
+    fn pipe_security_descriptor_rejects_a_nonexistent_parent() {
+        assert!(pipe_security_descriptor(u32::MAX - 1).is_err());
+    }
 
     #[test]
     fn local_pipe_round_trip_checks_peer_and_protocol() {

@@ -42,6 +42,7 @@ pub struct PortProxyApp {
     docker: DockerStatus,
     busy: bool,
     message: String,
+    error: Option<String>,
     import_path: String,
     export_path: String,
     sort_column: String,
@@ -73,6 +74,7 @@ impl PortProxyApp {
             docker: DockerStatus::default(),
             busy: false,
             message: "Loading Windows state…".to_owned(),
+            error: None,
             import_path: String::new(),
             export_path: String::new(),
             sort_column: state.sort_column,
@@ -89,6 +91,12 @@ impl PortProxyApp {
             sender,
             receiver,
         };
+        if let Err(error) = ys_netsh_portproxy::windows::helper_path() {
+            app.error = Some(format!(
+                "Privileged helper unavailable: {error}. Apply changes cannot reach Windows \
+                 until ys-netsh-portproxy-helper.exe sits beside the GUI executable."
+            ));
+        }
         app.spawn_refresh(context.egui_ctx.clone());
         app
     }
@@ -261,54 +269,69 @@ impl PortProxyApp {
                         }
                         self.sort_rules();
                         self.draft_dirty = true;
+                        self.error = None;
                         self.message = format!(
                             "Imported {} new rule(s); existing duplicates were preserved",
                             self.rules.len() - before
                         );
                         self.persist_state();
                     }
-                    Err(error) => self.message = format!("Import failed: {error}"),
+                    Err(error) => self.error = Some(format!("Import failed: {error}")),
                 },
                 WorkerResult::Applied(result) => match result {
                     Ok(outcome) => {
                         self.draft_dirty = false;
+                        self.error = None;
                         if let Some(backup_id) = outcome.backup_id {
                             self.backup_id = backup_id;
                         }
-                        self.message = format!(
-                            "Applied {} registry change(s); backup {}",
-                            outcome.changes.len(),
-                            if self.backup_id.is_empty() {
-                                "not created"
-                            } else {
-                                &self.backup_id
-                            }
-                        );
+                        self.message = if outcome.changes.is_empty() {
+                            "No registry changes were needed — Windows already matches the draft"
+                                .to_owned()
+                        } else {
+                            format!(
+                                "Applied {} registry change(s); backup {}",
+                                outcome.changes.len(),
+                                if self.backup_id.is_empty() {
+                                    "not created"
+                                } else {
+                                    &self.backup_id
+                                }
+                            )
+                        };
                         self.persist_state();
                         self.spawn_refresh(context.clone());
                     }
                     Err(error) => {
-                        self.message = format!("Operation failed: {error}");
+                        self.error = Some(format!("Apply failed: {error}"));
                         self.spawn_refresh(context.clone());
                     }
                 },
                 WorkerResult::Command(result) => {
-                    self.message = match result {
+                    match result {
                         Ok(CommandResult::BackupRestored { backup_id }) => {
                             self.backup_id = backup_id;
-                            format!("Backup restored; undo backup {}", self.backup_id)
+                            self.error = None;
+                            self.message =
+                                format!("Backup restored; undo backup {}", self.backup_id);
                         }
-                        Ok(result) => command_result_message(result),
-                        Err(error) => format!("Operation failed: {error}"),
-                    };
+                        Ok(result) => {
+                            self.error = None;
+                            self.message = command_result_message(result);
+                        }
+                        Err(error) => self.error = Some(format!("Operation failed: {error}")),
+                    }
                     self.persist_state();
                     self.spawn_refresh(context.clone());
                 }
                 WorkerResult::Operation(result) => {
-                    self.message = match result {
-                        Ok(message) => message,
-                        Err(error) => format!("Operation failed: {error}"),
-                    };
+                    match result {
+                        Ok(message) => {
+                            self.error = None;
+                            self.message = message;
+                        }
+                        Err(error) => self.error = Some(format!("Operation failed: {error}")),
+                    }
                     self.persist_state();
                     self.spawn_refresh(context.clone());
                 }
@@ -988,6 +1011,14 @@ impl eframe::App for PortProxyApp {
         });
         egui::TopBottomPanel::bottom("bottom").show(context, |ui| {
             ui.add_space(3.0);
+            if let Some(error) = self.error.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(Color32::LIGHT_RED, RichText::new(error).strong());
+                    if ui.small_button("Dismiss").clicked() {
+                        self.error = None;
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 if self.busy {
                     ui.spinner();
