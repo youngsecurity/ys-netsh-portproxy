@@ -1,5 +1,7 @@
 #![allow(unsafe_code)]
 
+use std::collections::BTreeMap;
+
 use windows::{
     core::BSTR,
     Win32::{
@@ -133,6 +135,26 @@ pub fn ensure_rule(
         })()
     }
     .map_err(adapter_error)
+}
+
+pub fn rule_groups(rule_ids: &[String]) -> Result<BTreeMap<String, String>, AppError> {
+    let _apartment = ComApartment::initialize()?;
+    let policy2: INetFwPolicy2 =
+        unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
+            .map_err(adapter_error)?;
+    let rules = unsafe { policy2.Rules() }.map_err(adapter_error)?;
+    let mut groups = BTreeMap::new();
+    for rule_id in rule_ids {
+        let name = BSTR::from(format!("{RULE_PREFIX}{rule_id}"));
+        let Ok(rule) = (unsafe { rules.Item(&name) }) else {
+            continue;
+        };
+        let group = unsafe { rule.Grouping() }.map_err(adapter_error)?.to_string();
+        if !group.is_empty() {
+            groups.insert(rule_id.clone(), group);
+        }
+    }
+    Ok(groups)
 }
 
 pub fn rule_exists(rule_id: &str) -> Result<bool, AppError> {

@@ -15,8 +15,6 @@ pub const STATE_SCHEMA_VERSION: u16 = 1;
 pub struct UserState {
     pub schema_version: u16,
     #[serde(default)]
-    pub groups: Vec<String>,
-    #[serde(default)]
     pub rules: Vec<ManagedRule>,
     #[serde(default = "default_sort_column")]
     pub sort_column: String,
@@ -34,7 +32,6 @@ impl Default for UserState {
     fn default() -> Self {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
-            groups: Vec::new(),
             rules: Vec::new(),
             sort_column: default_sort_column(),
             sort_ascending: default_sort_ascending(),

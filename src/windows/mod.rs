@@ -320,7 +320,7 @@ fn create_registry_backup() -> Result<String, AppError> {
         std::fs::create_dir_all(parent).map_err(|error| AppError::Adapter(error.to_string()))?;
     }
     let rules = report.rules.into_iter().map(ManagedRule::new).collect();
-    BackupDocument::new(rules, Vec::new())
+    BackupDocument::new(rules)
         .save_new(&path)
         .map_err(|error| AppError::Adapter(error.to_string()))?;
     Ok(backup_id)

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -33,7 +34,7 @@ struct ViewOptions {
 
 pub struct PortProxyApp {
     rules: Vec<ManagedRule>,
-    groups: Vec<String>,
+    firewall_groups: BTreeMap<String, String>,
     selected: Option<usize>,
     editor: Option<RuleEditor>,
     diagnostics: Vec<String>,
@@ -65,7 +66,7 @@ impl PortProxyApp {
         let state = UserState::load(&state_path).unwrap_or_default();
         let mut app = Self {
             rules: state.rules,
-            groups: state.groups,
+            firewall_groups: BTreeMap::new(),
             selected: None,
             editor: None,
             diagnostics: Vec::new(),
@@ -108,15 +109,32 @@ impl PortProxyApp {
         self.busy = true;
         "Refreshing registry, service, WSL, and Docker state…".clone_into(&mut self.message);
         let sender = self.sender.clone();
+        let known_rule_ids: Vec<String> = self
+            .rules
+            .iter()
+            .map(|managed| firewall_rule_id(managed.rule.key()))
+            .collect();
         thread::spawn(move || {
             let registry = RegistryAdapter::new().read_report();
             let probes = WindowsProbes::new();
             let service = probes.service_state().unwrap_or(ServiceState::Unknown);
+            let mut rule_ids: BTreeSet<String> = known_rule_ids.into_iter().collect();
+            rule_ids.extend(
+                registry
+                    .rules
+                    .iter()
+                    .map(|rule| firewall_rule_id(rule.key())),
+            );
+            let rule_ids: Vec<String> = rule_ids.into_iter().collect();
+            let firewall_groups = probes
+                .managed_firewall_groups(&rule_ids)
+                .unwrap_or_default();
             let result = WorkerResult::Refreshed {
                 registry,
                 service,
                 wsl: probes.wsl_status(),
                 docker: probes.docker_status(),
+                firewall_groups,
             };
             let _ = sender.send(result);
             context.request_repaint();
@@ -220,10 +238,10 @@ impl PortProxyApp {
                     service,
                     wsl,
                     docker,
+                    firewall_groups,
                 } => {
                     let state = UserState {
                         rules: self.rules.clone(),
-                        groups: self.groups.clone(),
                         ..UserState::default()
                     };
                     self.rules = state.merge_effective_against(
@@ -241,6 +259,7 @@ impl PortProxyApp {
                     self.ip_helper = service;
                     self.wsl = wsl;
                     self.docker = docker;
+                    self.firewall_groups = firewall_groups;
                     self.message = if self.draft_dirty {
                         format!(
                             "Loaded {} effective rule(s); preserved pending drafts",
@@ -262,11 +281,6 @@ impl PortProxyApp {
                                 .into_iter()
                                 .filter(|item| !existing.contains(&item.rule.key())),
                         );
-                        for group in document.groups {
-                            if !self.groups.contains(&group) {
-                                self.groups.push(group);
-                            }
-                        }
                         self.sort_rules();
                         self.draft_dirty = true;
                         self.error = None;
@@ -342,7 +356,6 @@ impl PortProxyApp {
     fn persist_state(&mut self) {
         let state = UserState {
             rules: self.rules.clone(),
-            groups: self.groups.clone(),
             sort_column: self.sort_column.clone(),
             sort_ascending: self.sort_ascending,
             draft_dirty: self.draft_dirty,
@@ -590,11 +603,14 @@ impl PortProxyApp {
 
     fn sort_rules(&mut self) {
         let column = self.sort_column.as_str();
+        let firewall_groups = &self.firewall_groups;
         self.rules.sort_by(|left, right| match column {
             "Type" => left.rule.kind.cmp(&right.rule.kind),
             "Listen" => left.rule.listen.cmp(&right.rule.listen),
             "Connect" => left.rule.connect.cmp(&right.rule.connect),
-            "Group" => left.group.cmp(&right.group),
+            "Group" => firewall_groups
+                .get(&firewall_rule_id(left.rule.key()))
+                .cmp(&firewall_groups.get(&firewall_rule_id(right.rule.key()))),
             "Comment" => left.comment.cmp(&right.comment),
             "Enabled" => left.enabled.cmp(&right.enabled),
             _ => left.rule.key().cmp(&right.rule.key()),
@@ -682,11 +698,15 @@ impl PortProxyApp {
                     ui.label(managed.rule.kind.to_string());
                     ui.label(managed.rule.listen.to_string());
                     ui.label(managed.rule.connect.to_string());
-                    ui.label(if managed.group.is_empty() {
-                        "—"
-                    } else {
-                        &managed.group
-                    });
+                    let firewall_group = self
+                        .firewall_groups
+                        .get(&firewall_rule_id(managed.rule.key()));
+                    ui.label(firewall_group.map_or("—", String::as_str))
+                        .on_hover_text(
+                            "Rule group of this proxy's inbound rule in Windows Defender \
+                             Firewall, as created by this app. — means no app-managed \
+                             firewall rule exists.",
+                        );
                     ui.label(if managed.comment.is_empty() {
                         "—"
                     } else {
@@ -862,7 +882,7 @@ impl PortProxyApp {
                     .add_enabled(!self.busy, egui::Button::new("Export new"))
                     .clicked()
                 {
-                    let document = BackupDocument::new(self.rules.clone(), self.groups.clone());
+                    let document = BackupDocument::new(self.rules.clone());
                     self.spawn_export(
                         PathBuf::from(self.export_path.trim()),
                         document,
@@ -1042,7 +1062,6 @@ struct RuleEditor {
     range_enabled: bool,
     listen_end: String,
     enabled: bool,
-    group: String,
     comment: String,
     firewall: FirewallPolicy,
     error: Option<String>,
@@ -1060,7 +1079,6 @@ impl RuleEditor {
             range_enabled: false,
             listen_end: String::new(),
             enabled: true,
-            group: String::new(),
             comment: String::new(),
             firewall: FirewallPolicy::None,
             error: None,
@@ -1084,7 +1102,6 @@ impl RuleEditor {
             range_enabled: false,
             listen_end: managed.rule.listen.port.to_string(),
             enabled: managed.enabled,
-            group: managed.group.clone(),
             comment: managed.comment.clone(),
             firewall: managed.firewall,
             error: None,
@@ -1140,9 +1157,6 @@ impl RuleEditor {
                 ui.label("Enabled");
                 ui.checkbox(&mut self.enabled, "Present in effective Windows state");
                 ui.end_row();
-                ui.label("Group");
-                ui.text_edit_singleline(&mut self.group);
-                ui.end_row();
                 ui.label("Comment");
                 ui.text_edit_singleline(&mut self.comment);
                 ui.end_row();
@@ -1196,7 +1210,6 @@ impl RuleEditor {
             .map(|rule| ManagedRule {
                 rule,
                 enabled: self.enabled,
-                group: self.group.trim().to_owned(),
                 comment: self.comment.trim().to_owned(),
                 firewall: self.firewall,
             })
@@ -1216,6 +1229,7 @@ enum WorkerResult {
         service: ServiceState,
         wsl: WslStatus,
         docker: DockerStatus,
+        firewall_groups: BTreeMap<String, String>,
     },
     Imported(Result<BackupDocument, String>),
     Applied(Result<ys_netsh_portproxy::app::ApplyOutcome, String>),

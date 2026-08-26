@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,6 +48,10 @@ pub trait PrivilegedExecutor {
 pub trait IntegrationProbe {
     fn service_state(&self) -> Result<ServiceState, AppError>;
     fn managed_firewall_exists(&self, rule_id: &str) -> Result<bool, AppError>;
+    fn managed_firewall_groups(
+        &self,
+        rule_ids: &[String],
+    ) -> Result<BTreeMap<String, String>, AppError>;
     fn wsl_status(&self) -> WslStatus;
     fn docker_status(&self) -> DockerStatus;
 }
@@ -253,6 +259,20 @@ mod tests {
 
         fn managed_firewall_exists(&self, _rule_id: &str) -> Result<bool, AppError> {
             Ok(self.firewall_exists)
+        }
+
+        fn managed_firewall_groups(
+            &self,
+            rule_ids: &[String],
+        ) -> Result<BTreeMap<String, String>, AppError> {
+            Ok(if self.firewall_exists {
+                rule_ids
+                    .iter()
+                    .map(|rule_id| (rule_id.clone(), "Young Security PortProxy".to_owned()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            })
         }
 
         fn wsl_status(&self) -> WslStatus {

@@ -39,6 +39,13 @@ impl IntegrationProbe for WindowsProbes {
         super::firewall::rule_exists(rule_id)
     }
 
+    fn managed_firewall_groups(
+        &self,
+        rule_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>, AppError> {
+        super::firewall::rule_groups(rule_ids)
+    }
+
     fn wsl_status(&self) -> WslStatus {
         discover_wsl()
     }

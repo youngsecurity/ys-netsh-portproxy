@@ -198,8 +198,6 @@ pub struct ManagedRule {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
-    pub group: String,
-    #[serde(default)]
     pub comment: String,
     #[serde(default)]
     pub firewall: FirewallPolicy,
@@ -211,7 +209,6 @@ impl ManagedRule {
         Self {
             rule,
             enabled: true,
-            group: String::new(),
             comment: String::new(),
             firewall: FirewallPolicy::None,
         }

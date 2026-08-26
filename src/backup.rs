@@ -11,18 +11,15 @@ pub const BACKUP_SCHEMA_VERSION: u16 = 1;
 pub struct BackupDocument {
     pub schema_version: u16,
     pub application_version: String,
-    #[serde(default)]
-    pub groups: Vec<String>,
     pub rules: Vec<ManagedRule>,
 }
 
 impl BackupDocument {
     #[must_use]
-    pub fn new(rules: Vec<ManagedRule>, groups: Vec<String>) -> Self {
+    pub fn new(rules: Vec<ManagedRule>) -> Self {
         Self {
             schema_version: BACKUP_SCHEMA_VERSION,
             application_version: env!("CARGO_PKG_VERSION").to_owned(),
-            groups,
             rules,
         }
     }
@@ -38,17 +35,14 @@ impl BackupDocument {
                 managed.rule.listen,
                 managed.rule.connect,
             )?;
-            if managed.group.len() > 128 || managed.comment.len() > 1_024 {
-                return Err(BackupError::InvalidGroup);
+            if managed.comment.len() > 1_024 {
+                return Err(BackupError::InvalidComment);
             }
             if !keys.insert(managed.rule.key()) {
                 return Err(BackupError::Domain(DomainError::DuplicateRule(
                     managed.rule.key(),
                 )));
             }
-        }
-        if self.groups.iter().any(|group| group.len() > 128) {
-            return Err(BackupError::InvalidGroup);
         }
         Ok(())
     }
@@ -85,8 +79,8 @@ impl BackupDocument {
 pub enum BackupError {
     #[error("unsupported backup schema version: {0}")]
     UnsupportedSchema(u16),
-    #[error("backup contains an invalid group")]
-    InvalidGroup,
+    #[error("backup contains an invalid comment")]
+    InvalidComment,
     #[error(transparent)]
     Domain(#[from] DomainError),
     #[error("I/O error: {0}")]
@@ -112,9 +106,8 @@ mod tests {
     #[test]
     fn versioned_backup_round_trips_without_losing_metadata() {
         let mut rule = managed_rule();
-        rule.group = "WSL".to_owned();
         rule.comment = "SSH".to_owned();
-        let expected = BackupDocument::new(vec![rule], vec!["WSL".to_owned()]);
+        let expected = BackupDocument::new(vec![rule]);
         let actual = BackupDocument::from_json(&expected.to_pretty_json().unwrap()).unwrap();
         assert_eq!(actual, expected);
     }
@@ -123,13 +116,13 @@ mod tests {
     fn invalid_deserialized_rule_is_rejected() {
         let mut invalid = managed_rule();
         invalid.rule.kind = ProxyKind::V6ToV4;
-        let document = BackupDocument::new(vec![invalid], Vec::new());
+        let document = BackupDocument::new(vec![invalid]);
         assert!(matches!(document.validate(), Err(BackupError::Domain(_))));
     }
 
     #[test]
     fn unknown_schema_fails_closed() {
-        let mut document = BackupDocument::new(vec![managed_rule()], Vec::new());
+        let mut document = BackupDocument::new(vec![managed_rule()]);
         document.schema_version = 999;
         assert!(matches!(
             document.validate(),
@@ -140,7 +133,7 @@ mod tests {
     #[test]
     fn duplicate_rule_keys_are_rejected() {
         let rule = managed_rule();
-        let document = BackupDocument::new(vec![rule.clone(), rule], Vec::new());
+        let document = BackupDocument::new(vec![rule.clone(), rule]);
         assert!(matches!(
             document.validate(),
             Err(BackupError::Domain(DomainError::DuplicateRule(_)))

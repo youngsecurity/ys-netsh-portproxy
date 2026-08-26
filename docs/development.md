@@ -34,6 +34,20 @@ target/release/ys-netsh-portproxy-helper.exe
 
 Keep both executables in the same directory. The GUI locates the helper only beside its own canonical executable path.
 
+## Releasing
+
+Distributed builds go to `C:\temp\ys-netsh-portproxy-dist\v<version>\` and are
+immutable: never overwrite the contents of an existing versioned folder. Any
+code change that ships — however small — requires a version bump in
+`Cargo.toml` (refresh `Cargo.lock` with `cargo check`) and a fresh folder.
+
+Use the release script from WSL; it refuses to overwrite an existing version
+and always emits both executables plus `SHA256SUMS.txt`:
+
+```bash
+./scripts/release.sh
+```
+
 ## Testing policy
 
 Durable test seams are:
